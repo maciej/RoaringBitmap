@@ -9,17 +9,27 @@ import java.util.concurrent.Phaser;
 @SuppressWarnings("Duplicates")
 public class BufferParallelAggregation {
 
-    private static final int BATCH_SIZE = 8;
+    private static final int DEFAULT_BATCH_SIZE = 8;
 
     private final ExecutorService executorService;
+    private final int batchSize;
 
+    @SuppressWarnings("WeakerAccess")
     public BufferParallelAggregation(ExecutorService executorService) {
+        this(executorService, DEFAULT_BATCH_SIZE);
+    }
+
+    @SuppressWarnings("WeakerAccess")
+    public BufferParallelAggregation(ExecutorService executorService, int batchSize) {
         this.executorService = executorService;
+        this.batchSize = batchSize;
     }
 
     public MutableRoaringBitmap or(ImmutableRoaringBitmap... bitmaps) {
         MutableRoaringBitmap b = new MutableRoaringBitmap();
-        if (bitmaps.length == 1) {
+        if (bitmaps.length == 0) {
+            return b;
+        } else if (bitmaps.length == 1) {
             return bitmaps[0].toMutableRoaringBitmap();
         }
 
@@ -37,23 +47,73 @@ public class BufferParallelAggregation {
             executorService.submit(new Runnable() {
                 @Override
                 public void run() {
-                    try {
-                        SingleContainer[] aggregated = new SingleContainer[BATCH_SIZE];
-                        for (int i = 0; i < mcbf.length; i++) {
-                            if (mcbf[i] == null)
-                                break;
-                            aggregated[i] = unionOfMultipleContainers(mcbf[i]);
-                        }
+                    SingleContainer[] aggregated = new SingleContainer[batchSize];
+                    for (int i = 0; i < mcbf.length; i++) {
+                        if (mcbf[i] == null)
+                            break;
+                        aggregated[i] = unionOf(mcbf[i]);
+                    }
 
-                        synchronized (resultList) {
-                            for (SingleContainer singleContainer : aggregated) {
-                                if (singleContainer == null)
-                                    break;
-                                resultList.add(singleContainer);
-                            }
+                    synchronized (resultList) {
+                        for (SingleContainer singleContainer : aggregated) {
+                            if (singleContainer == null)
+                                break;
+                            resultList.add(singleContainer);
                         }
-                    } catch (Throwable t) {
-                        t.printStackTrace();
+                    }
+                    phaser.arrive();
+                }
+            });
+        }
+
+        // wait
+        phaser.arriveAndAwaitAdvance();
+
+        Collections.sort(resultList);
+
+        for (SingleContainer singleContainer : resultList) {
+            b.getMappeableRoaringArray().append(singleContainer.key, singleContainer.container);
+        }
+
+        return b;
+    }
+
+    public MutableRoaringBitmap and(ImmutableRoaringBitmap... bitmaps) {
+        final int bitmapCount = bitmaps.length;
+        MutableRoaringBitmap b = new MutableRoaringBitmap();
+        if (bitmaps.length == 0) {
+            return b;
+        } else if (bitmaps.length == 1) {
+            return bitmaps[0].toMutableRoaringBitmap();
+        }
+
+        PriorityQueue<MappeableContainerPointer> heap = buildContainerKeyHeap(bitmaps);
+
+        final ArrayList<SingleContainer> resultList = new ArrayList<>();
+
+        final Phaser phaser = new Phaser();
+        phaser.register();
+
+        for (MultipleContainers[] mcb = nextContainersBatch(heap); mcb[0] != null; mcb = nextContainersBatch(heap)) {
+            final MultipleContainers[] mcbf = mcb;
+
+            phaser.register();
+            executorService.submit(new Runnable() {
+                @Override
+                public void run() {
+                    SingleContainer[] aggregated = new SingleContainer[batchSize];
+                    for (int i = 0; i < mcbf.length; i++) {
+                        if (mcbf[i] == null || mcbf[i].containers.size() < bitmapCount)
+                            continue;
+                        aggregated[i] = intersectionOf(mcbf[i]);
+                    }
+
+                    synchronized (resultList) {
+                        for (SingleContainer singleContainer : aggregated) {
+                            if (singleContainer == null)
+                                continue;
+                            resultList.add(singleContainer);
+                        }
                     }
                     phaser.arrive();
                 }
@@ -121,9 +181,9 @@ public class BufferParallelAggregation {
         return new MultipleContainers(containers, initialKey, -1);
     }
 
-    private static MultipleContainers[] nextContainersBatch(PriorityQueue<MappeableContainerPointer> containerHeap) {
-        MultipleContainers[] containers = new MultipleContainers[BATCH_SIZE];
-        for (int i = 0; i < BATCH_SIZE; i++) {
+    private MultipleContainers[] nextContainersBatch(PriorityQueue<MappeableContainerPointer> containerHeap) {
+        MultipleContainers[] containers = new MultipleContainers[batchSize];
+        for (int i = 0; i < batchSize; i++) {
             MultipleContainers mc = nextContainers(containerHeap);
             if (mc == null) {
                 break;
@@ -134,7 +194,7 @@ public class BufferParallelAggregation {
         return containers;
     }
 
-    private static SingleContainer unionOfMultipleContainers(MultipleContainers mc) {
+    private static SingleContainer unionOf(MultipleContainers mc) {
         if (mc.containers.size() == 1) {
             return new SingleContainer(mc.key, mc.containers.get(0), mc.idx);
         }
@@ -144,6 +204,20 @@ public class BufferParallelAggregation {
             r = r.lazyIOR(mc.containers.get(i));
         }
         r = r.repairAfterLazy();
+
+        return new SingleContainer(mc.key, r, mc.idx);
+    }
+
+    private static SingleContainer intersectionOf(MultipleContainers mc) {
+        if (mc.containers.size() == 1) {
+            return new SingleContainer(mc.key, mc.containers.get(0), mc.idx);
+        }
+
+        MappeableContainer r = mc.containers.get(0).and(mc.containers.get(1));
+
+        for (int i = 2; i < mc.containers.size(); i++) {
+            r = r.iand(mc.containers.get(i));
+        }
 
         return new SingleContainer(mc.key, r, mc.idx);
     }
