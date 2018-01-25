@@ -11,7 +11,7 @@ public class BufferParallelAggregation {
 
     private static final int DEFAULT_BATCH_SIZE = 8;
 
-    private final ExecutorService executorService;
+    final ExecutorService executorService;
     private final int batchSize;
 
     @SuppressWarnings("WeakerAccess")
