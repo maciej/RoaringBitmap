@@ -103,16 +103,14 @@ public class BufferParallelAggregation {
                 public void run() {
                     SingleContainer[] aggregated = new SingleContainer[batchSize];
                     for (int i = 0; i < mcbf.length; i++) {
-                        if (mcbf[i] == null || mcbf[i].containers.size() < bitmapCount)
-                            continue;
-                        aggregated[i] = intersectionOf(mcbf[i]);
+                        if (mcbf[i] != null && mcbf[i].containers.size() >= bitmapCount) {
+                            aggregated[i] = intersectionOf(mcbf[i]);
+                        }
                     }
 
                     synchronized (resultList) {
                         for (SingleContainer singleContainer : aggregated) {
-                            if (singleContainer == null)
-                                continue;
-                            resultList.add(singleContainer);
+                            if (singleContainer != null) resultList.add(singleContainer);
                         }
                     }
                     phaser.arrive();
@@ -219,7 +217,11 @@ public class BufferParallelAggregation {
             r = r.iand(mc.containers.get(i));
         }
 
-        return new SingleContainer(mc.key, r, mc.idx);
+        if (r.getCardinality() > 0) {
+            return new SingleContainer(mc.key, r, mc.idx);
+        } else {
+            return null;
+        }
     }
 
     private static class SingleContainer implements Comparable<SingleContainer> {
