@@ -212,16 +212,17 @@ public class BufferParallelAggregation {
         }
 
         MappeableContainer r = mc.containers.get(0).and(mc.containers.get(1));
+        if (r.getCardinality() == 0)
+            return null;
 
         for (int i = 2; i < mc.containers.size(); i++) {
             r = r.iand(mc.containers.get(i));
+
+            if (r.getCardinality() == 0)
+                return null;
         }
 
-        if (r.getCardinality() > 0) {
-            return new SingleContainer(mc.key, r, mc.idx);
-        } else {
-            return null;
-        }
+        return new SingleContainer(mc.key, r, mc.idx);
     }
 
     private static class SingleContainer implements Comparable<SingleContainer> {
